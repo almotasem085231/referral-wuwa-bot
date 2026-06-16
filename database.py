@@ -75,6 +75,19 @@ def init_db():
     )
     """)
     
+    # Create streaks table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS streaks (
+        user_id INTEGER PRIMARY KEY,
+        current_streak INTEGER DEFAULT 0,
+        best_streak INTEGER DEFAULT 0,
+        daily_messages INTEGER DEFAULT 0,
+        last_active_day TEXT,
+        last_message_date TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+    )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -539,6 +552,9 @@ def reset_user_data(user_id):
             (user_id,)
         )
         
+        # Delete user's streak
+        cursor.execute("DELETE FROM streaks WHERE user_id = ?", (user_id,))
+        
         conn.commit()
         
         # We need to recalculate points for any referrers of the deleted referrals?
@@ -595,7 +611,7 @@ def get_general_stats():
 
 def reset_all_database():
     """
-    Wipes ALL data from all tables (users, referrals, message_counts, points, bans).
+    Wipes ALL data from all tables (users, referrals, message_counts, points, bans, streaks).
     Keeps the schema intact (tables remain but are emptied).
     Returns True on success, False on error.
     """
@@ -606,6 +622,7 @@ def reset_all_database():
         cursor.execute("DELETE FROM bans")
         cursor.execute("DELETE FROM points")
         cursor.execute("DELETE FROM message_counts")
+        cursor.execute("DELETE FROM streaks")
         cursor.execute("DELETE FROM users")
         conn.commit()
         return True
@@ -614,3 +631,257 @@ def reset_all_database():
         return False
     finally:
         conn.close()
+
+def update_streak_on_message(user_id):
+    """
+    Increments the daily message count for the user's streak.
+    If the user reaches 20 messages today, updates current_streak and best_streak.
+    Also handles daily reset and streak breaks.
+    
+    Returns:
+        dict: streak update results
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    result = {
+        'streak_achieved': False,
+        'streak_broken': False,
+        'current_streak': 0,
+        'best_streak': 0,
+        'previous_streak': 0,
+        'daily_messages': 0
+    }
+    
+    try:
+        # 1. Ensure user has a streak record
+        cursor.execute("SELECT * FROM streaks WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        if not row:
+            # Create a new streak record
+            cursor.execute(
+                """
+                INSERT INTO streaks (user_id, current_streak, best_streak, daily_messages, last_active_day, last_message_date)
+                VALUES (?, 0, 0, 1, NULL, ?)
+                """,
+                (user_id, today)
+            )
+            result['daily_messages'] = 1
+            conn.commit()
+            return result
+            
+        # User has an existing streak record
+        current_streak = row['current_streak']
+        best_streak = row['best_streak']
+        daily_messages = row['daily_messages']
+        last_active_day = row['last_active_day']
+        last_message_date = row['last_message_date']
+        
+        # 2. Check if a new day has started
+        if last_message_date != today:
+            # It's a new day! Check if streak was broken
+            streak_broken = False
+            previous_streak = current_streak
+            
+            if last_active_day:
+                # Calculate difference in days between today and last_active_day
+                try:
+                    date_today = datetime.strptime(today, '%Y-%m-%d')
+                    date_last_active = datetime.strptime(last_active_day, '%Y-%m-%d')
+                    days_diff = (date_today - date_last_active).days
+                    if days_diff > 1 and current_streak > 0:
+                        streak_broken = True
+                        current_streak = 0
+                except Exception:
+                    pass
+            else:
+                if current_streak > 0:
+                    streak_broken = True
+                    current_streak = 0
+                    
+            if streak_broken:
+                result['streak_broken'] = True
+                result['previous_streak'] = previous_streak
+                
+            # Reset daily messages for the new day
+            daily_messages = 1
+            last_message_date = today
+        else:
+            # Same day, just increment daily messages
+            daily_messages += 1
+            
+        # 3. Check if user reached the active threshold (20 messages) today
+        if daily_messages == 20:
+            if last_active_day != today:
+                # Streak achieved!
+                result['streak_achieved'] = True
+                
+                # Check if last_active_day was yesterday
+                was_yesterday = False
+                if last_active_day:
+                    try:
+                        date_today = datetime.strptime(today, '%Y-%m-%d')
+                        date_last_active = datetime.strptime(last_active_day, '%Y-%m-%d')
+                        days_diff = (date_today - date_last_active).days
+                        if days_diff == 1:
+                            was_yesterday = True
+                    except Exception:
+                        pass
+                        
+                if was_yesterday:
+                    current_streak += 1
+                else:
+                    current_streak = 1
+                    
+                if current_streak > best_streak:
+                    best_streak = current_streak
+                    
+                last_active_day = today
+                
+        # Update database
+        cursor.execute(
+            """
+            UPDATE streaks
+            SET current_streak = ?, best_streak = ?, daily_messages = ?, last_active_day = ?, last_message_date = ?
+            WHERE user_id = ?
+            """,
+            (current_streak, best_streak, daily_messages, last_active_day, last_message_date, user_id)
+        )
+        
+        result['current_streak'] = current_streak
+        result['best_streak'] = best_streak
+        result['daily_messages'] = daily_messages
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+        
+    return result
+
+def get_or_update_user_streak(user_id):
+    """
+    Retrieves the user's streak information.
+    Updates the streak record (checks for day change and streak break) if necessary.
+    
+    Returns:
+        dict: user streak data
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    try:
+        cursor.execute("SELECT * FROM streaks WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            # Check if user exists in users table first
+            cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+            user_exists = cursor.fetchone()
+            if not user_exists:
+                return None
+                
+            cursor.execute(
+                """
+                INSERT INTO streaks (user_id, current_streak, best_streak, daily_messages, last_active_day, last_message_date)
+                VALUES (?, 0, 0, 0, NULL, NULL)
+                """,
+                (user_id,)
+            )
+            conn.commit()
+            return {
+                'user_id': user_id,
+                'current_streak': 0,
+                'best_streak': 0,
+                'daily_messages': 0,
+                'last_active_day': None,
+                'last_message_date': None,
+                'streak_broken': False,
+                'previous_streak': 0
+            }
+            
+        current_streak = row['current_streak']
+        best_streak = row['best_streak']
+        daily_messages = row['daily_messages']
+        last_active_day = row['last_active_day']
+        last_message_date = row['last_message_date']
+        
+        updated = False
+        streak_broken = False
+        previous_streak = current_streak
+        
+        # Check if a new day has started
+        if last_message_date and last_message_date != today:
+            # It's a new day, reset daily messages to 0
+            daily_messages = 0
+            updated = True
+            
+            # Check if streak broke
+            if last_active_day:
+                try:
+                    date_today = datetime.strptime(today, '%Y-%m-%d')
+                    date_last_active = datetime.strptime(last_active_day, '%Y-%m-%d')
+                    days_diff = (date_today - date_last_active).days
+                    if days_diff > 1 and current_streak > 0:
+                        streak_broken = True
+                        current_streak = 0
+                except Exception:
+                    pass
+            else:
+                if current_streak > 0:
+                    streak_broken = True
+                    current_streak = 0
+                    
+        if updated:
+            cursor.execute(
+                """
+                UPDATE streaks
+                SET current_streak = ?, best_streak = ?, daily_messages = ?, last_message_date = ?
+                WHERE user_id = ?
+                """,
+                (current_streak, best_streak, daily_messages, last_message_date, user_id)
+            )
+            conn.commit()
+            
+        return {
+            'user_id': user_id,
+            'current_streak': current_streak,
+            'best_streak': best_streak,
+            'daily_messages': daily_messages,
+            'last_active_day': last_active_day,
+            'last_message_date': last_message_date,
+            'streak_broken': streak_broken,
+            'previous_streak': previous_streak
+        }
+        
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+def get_streak_leaderboard(limit=10):
+    """Gets top users sorted by best_streak, then by current_streak."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT u.user_id, u.username, u.first_name, s.best_streak, s.current_streak
+        FROM users u
+        JOIN streaks s ON u.user_id = s.user_id
+        WHERE u.is_banned = 0 AND s.best_streak > 0
+        ORDER BY s.best_streak DESC, s.current_streak DESC
+        LIMIT ?
+        """,
+        (limit,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]

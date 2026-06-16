@@ -8,6 +8,10 @@ def get_user_main_keyboard(is_owner=False):
         KeyboardButton("🔗 رابط الإحالة")
     )
     markup.add(
+        KeyboardButton("🔥 سلسلة النشاط"),
+        KeyboardButton("🏆 ترتيب الستريك")
+    )
+    markup.add(
         KeyboardButton("🏆 أفضل المستخدمين"),
         KeyboardButton("ℹ️ معلومات البوت")
     )
@@ -21,6 +25,10 @@ def get_user_inline_menu(is_owner=False):
     markup.add(
         InlineKeyboardButton("📊 إحصائياتي", callback_data="user_stats"),
         InlineKeyboardButton("🔗 رابط الإحالة", callback_data="user_ref_link")
+    )
+    markup.add(
+        InlineKeyboardButton("🔥 سلسلة النشاط", callback_data="user_streak"),
+        InlineKeyboardButton("🏆 ترتيب الستريك", callback_data="user_streak_leaderboard")
     )
     markup.add(
         InlineKeyboardButton("🏆 أفضل المستخدمين", callback_data="user_leaderboard"),

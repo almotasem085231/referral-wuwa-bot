@@ -196,5 +196,90 @@ class TestBotDatabase(unittest.TestCase):
         self.assertEqual(database.get_users_count(), 0)
         self.assertIsNone(database.get_user(111))
 
+    def test_streak_increments_and_achievements(self):
+        database.add_user(111, "alice", "Alice")
+        
+        # Send 19 messages
+        for i in range(19):
+            res = database.update_streak_on_message(111)
+            self.assertFalse(res['streak_achieved'])
+            self.assertEqual(res['daily_messages'], i + 1)
+            self.assertEqual(res['current_streak'], 0)
+            
+        # 20th message achieves the streak!
+        res = database.update_streak_on_message(111)
+        self.assertTrue(res['streak_achieved'])
+        self.assertEqual(res['daily_messages'], 20)
+        self.assertEqual(res['current_streak'], 1)
+        self.assertEqual(res['best_streak'], 1)
+        
+        # 21st message does not re-achieve
+        res = database.update_streak_on_message(111)
+        self.assertFalse(res['streak_achieved'])
+        self.assertEqual(res['daily_messages'], 21)
+        self.assertEqual(res['current_streak'], 1)
+
+    def test_streak_preservation_and_break(self):
+        from datetime import datetime, timedelta
+        database.add_user(111, "alice", "Alice")
+        
+        # Achieve streak today
+        for _ in range(20):
+            res = database.update_streak_on_message(111)
+        self.assertEqual(res['current_streak'], 1)
+        
+        # Manually backdate streak to yesterday (as if it was yesterday)
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        conn = database.get_db_connection()
+        conn.execute("UPDATE streaks SET last_message_date = ?, last_active_day = ? WHERE user_id = ?", (yesterday, yesterday, 111))
+        conn.commit()
+        conn.close()
+        
+        # Send first message on the new day. daily_messages resets to 1, streak is not broken.
+        res = database.update_streak_on_message(111)
+        self.assertFalse(res['streak_broken'])
+        self.assertEqual(res['daily_messages'], 1)
+        
+        # Send 19 more messages (total 20 today). Streak should increment to 2.
+        for _ in range(19):
+            res = database.update_streak_on_message(111)
+        self.assertTrue(res['streak_achieved'])
+        self.assertEqual(res['current_streak'], 2)
+        self.assertEqual(res['best_streak'], 2)
+        
+        # Manually backdate streak to yesterday but set last_active_day to 2 days ago (as if we missed yesterday)
+        two_days_ago = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+        conn = database.get_db_connection()
+        conn.execute("UPDATE streaks SET last_message_date = ?, last_active_day = ? WHERE user_id = ?", (yesterday, two_days_ago, 111))
+        conn.commit()
+        conn.close()
+        
+        # Send first message. Streak breaks!
+        res = database.update_streak_on_message(111)
+        self.assertTrue(res['streak_broken'])
+        self.assertEqual(res['previous_streak'], 2)
+        self.assertEqual(res['current_streak'], 0)
+        self.assertEqual(res['best_streak'], 2)
+        self.assertEqual(res['daily_messages'], 1)
+
+    def test_streak_leaderboard(self):
+        database.add_user(111, "alice", "Alice")
+        database.add_user(222, "bob", "Bob")
+        database.add_user(333, "charlie", "Charlie")
+        
+        # Set streaks directly
+        conn = database.get_db_connection()
+        conn.execute("INSERT INTO streaks (user_id, current_streak, best_streak) VALUES (?, ?, ?)", (111, 5, 10))
+        conn.execute("INSERT INTO streaks (user_id, current_streak, best_streak) VALUES (?, ?, ?)", (222, 12, 15))
+        conn.execute("INSERT INTO streaks (user_id, current_streak, best_streak) VALUES (?, ?, ?)", (333, 2, 5))
+        conn.commit()
+        conn.close()
+        
+        leaders = database.get_streak_leaderboard(10)
+        self.assertEqual(len(leaders), 3)
+        self.assertEqual(leaders[0]['user_id'], 222)   # 15 best streak
+        self.assertEqual(leaders[1]['user_id'], 111)   # 10 best streak
+        self.assertEqual(leaders[2]['user_id'], 333)   # 5 best streak
+
 if __name__ == '__main__':
     unittest.main()

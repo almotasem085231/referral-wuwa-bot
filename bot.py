@@ -1,5 +1,6 @@
 import logging
 import math
+import time
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -58,11 +59,22 @@ async def is_user_member_of_group(user_id: int) -> bool:
         member = await bot.get_chat_member(chat_id=config.GROUP_ID, user_id=user_id)
         if member.status in ['creator', 'administrator', 'member', 'restricted']:
             return True
-    except Exception as e:
-        logging.warning(f"Error checking group membership for user {user_id}: {e}")
-        # Return False if check fails (e.g. if the user isn't in group or bot can't check)
+        # Status is 'left' or 'kicked' — user is definitely not a member
         return False
-    return False
+    except Exception as e:
+        error_msg = str(e).lower()
+        logging.warning(f"Error checking group membership for user {user_id}: {e}")
+        # If the error indicates the user is simply not found in the group, return False
+        if 'user not found' in error_msg or 'chat not found' in error_msg:
+            return False
+        # For permission errors or other API issues, fall back to DB check:
+        # If user has group_messages recorded, they were once a verified member
+        user_stats = database.get_user_stats(user_id)
+        if user_stats and user_stats.get('group_messages', 0) > 0:
+            logging.info(f"Fallback DB check: user {user_id} has {user_stats['group_messages']} group messages — treating as member.")
+            return True
+        # Cannot confirm membership, require them to join
+        return False
 
 class JoinCheckMiddleware(BaseMiddleware):
     """Enforces that users join the target group before they can use private chat features."""
@@ -189,6 +201,47 @@ def get_info_message_text():
         f"• يحتفظ مالك البوت بحق حظر أي مستخدم يتلاعب بالرسائل أو النقاط."
     )
 
+def get_streak_message_text(user_id):
+    streak = database.get_or_update_user_streak(user_id)
+    if not streak:
+        return "❌ لم يتم العثور على بياناتك في قاعدة البيانات. أرسل /start أولاً لتسجيل حسابك."
+        
+    current_streak = streak['current_streak']
+    best_streak = streak['best_streak']
+    daily_messages = streak['daily_messages']
+    
+    # Calculate daily progress percentage
+    progress_percentage = min(100, int((daily_messages / 20) * 100))
+    
+    return (
+        f"🔥 <b>سلسلة النشاط</b>\n\n"
+        f"📅 <b>السلسلة الحالية:</b> {current_streak} يوم\n"
+        f"🏆 <b>أعلى سلسلة:</b> {best_streak} يوم\n"
+        f"💬 <b>رسائل اليوم:</b> {daily_messages}/20\n"
+        f"📈 <b>نسبة الإنجاز اليوم:</b> {progress_percentage}%"
+    )
+
+def get_streak_leaderboard_message_text():
+    leaders = database.get_streak_leaderboard(10)
+    if not leaders:
+        return (
+            f"🏆 <b>أفضل سلاسل النشاط</b>\n\n"
+            f"لا توجد سلاسل نشاط مسجلة حالياً."
+        )
+        
+    text = "🏆 <b>أفضل سلاسل النشاط</b>\n\n"
+    for i, lead in enumerate(leaders, 1):
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"<b>{i}.</b>"
+        name = lead['first_name'] or "مستخدم"
+        username_str = f" (@{lead['username']})" if lead['username'] else ""
+        text += f"{medal} {name}{username_str} — {lead['best_streak']} يوم\n"
+        
+    return text
+
+# Cache to prevent spam and duplicate messages in groups
+# Format: {user_id: {'time': float, 'text': str}}
+user_msg_cache = {}
+
 # --- Group Message Tracking ---
 @dp.message_handler(chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP])
 async def handle_group_message(message: types.Message):
@@ -200,11 +253,63 @@ async def handle_group_message(message: types.Message):
     if config.GROUP_ID is not None and message.chat.id != config.GROUP_ID:
         return
 
+    # Spam & Duplicate filtering
+    user_id = message.from_user.id
+    now = time.time()
+    text = message.text.strip() if message.text else (message.caption.strip() if message.caption else "")
+
+    if user_id in user_msg_cache:
+        last_time = user_msg_cache[user_id]['time']
+        last_text = user_msg_cache[user_id]['text']
+        
+        # 1. Spam protection: consecutive messages within less than 2 seconds
+        if now - last_time < 2:
+            return
+            
+        # 2. Duplicate protection: exact same content as the last message
+        if text and text == last_text:
+            return
+
+    # Update cache
+    user_msg_cache[user_id] = {
+        'time': now,
+        'text': text
+    }
+
     # Add user to database if not exists
-    database.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    database.add_user(user_id, message.from_user.username, message.from_user.first_name)
     
+    # Update activity streak first to ensure stats are updated on message arrival
+    streak_res = database.update_streak_on_message(user_id)
+    
+    if streak_res['streak_broken']:
+        try:
+            await bot.send_message(
+                user_id,
+                f"💔 <b>انقطعت سلسلة نشاطك</b>\n\n"
+                f"📅 السلسلة السابقة: {streak_res['previous_streak']} يوم\n"
+                f"🏆 أعلى سلسلة: {streak_res['best_streak']} يوم"
+            )
+        except Exception:
+            pass
+            
+    if streak_res['streak_achieved']:
+        curr = streak_res['current_streak']
+        milestones = {
+            3: "🔥 3 أيام متتالية!",
+            7: "🔥 7 أيام متتالية!",
+            14: "🔥 14 يومًا متتاليًا!",
+            30: "🔥 30 يومًا متتاليًا!",
+            100: "🔥 100 يوم متتالي!"
+        }
+        streak_text = milestones.get(curr, f"🔥 <b>تم الحفاظ على سلسلة نشاطك!</b>\n📅 السلسلة الحالية: {curr} يوم")
+        try:
+            await bot.send_message(user_id, streak_text)
+        except Exception:
+            pass
+
     # Increment count
-    result = database.increment_message_count(message.from_user.id)
+    result = database.increment_message_count(user_id)
     
     # Notify referrer if referral became active
     if result['referral_activated'] and result['referrer_id']:
@@ -229,10 +334,10 @@ async def handle_group_message(message: types.Message):
     # Notify user if they earned an interaction point
     if result['interaction_point_earned']:
         try:
-            user_stats = database.get_user_stats(message.from_user.id)
+            user_stats = database.get_user_stats(user_id)
             total_pts = user_stats['total_points'] if user_stats else 0
             await bot.send_message(
-                message.from_user.id,
+                user_id,
                 f"💬 <b>تفاعل رائع!</b>\n\n"
                 f"لقد أرسلت <b>{result['group_messages']} رسالة</b> في المجموعة.\n"
                 f"حصلت على <b>+1 نقطة تفاعل</b>!\n"
@@ -328,18 +433,76 @@ async def menu_admin_panel_msg(message: types.Message):
         return
     await message.reply("⚙️ <b>أهلاً بك يا مالك البوت في لوحة التحكم:</b>", reply_markup=keyboards.get_admin_panel_keyboard())
 
+# --- Streak Handlers ---
+@dp.message_handler(commands=['streak'], chat_type=types.ChatType.PRIVATE)
+@dp.message_handler(lambda message: message.text == "🔥 سلسلة النشاط", chat_type=types.ChatType.PRIVATE)
+async def cmd_streak(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Check if user's streak broke and notify them in private chat
+    streak_data = database.get_or_update_user_streak(user_id)
+    if streak_data and streak_data.get('streak_broken'):
+        try:
+            await bot.send_message(
+                user_id,
+                f"💔 <b>انقطعت سلسلة نشاطك</b>\n\n"
+                f"📅 السلسلة السابقة: {streak_data['previous_streak']} يوم\n"
+                f"🏆 أعلى سلسلة: {streak_data['best_streak']} يوم"
+            )
+        except Exception:
+            pass
+            
+    await message.reply(get_streak_message_text(user_id))
+
+@dp.message_handler(commands=['streaktop'], chat_type=types.ChatType.PRIVATE)
+@dp.message_handler(lambda message: message.text == "🏆 ترتيب الستريك", chat_type=types.ChatType.PRIVATE)
+async def cmd_streaktop(message: types.Message):
+    await message.reply(get_streak_leaderboard_message_text())
+
+@dp.callback_query_handler(lambda call: call.data == "user_streak", state="*")
+async def user_streak_callback(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    
+    # Check if user's streak broke
+    streak_data = database.get_or_update_user_streak(user_id)
+    if streak_data and streak_data.get('streak_broken'):
+        try:
+            await bot.send_message(
+                user_id,
+                f"💔 <b>انقطعت سلسلة نشاطك</b>\n\n"
+                f"📅 السلسلة السابقة: {streak_data['previous_streak']} يوم\n"
+                f"🏆 أعلى سلسلة: {streak_data['best_streak']} يوم"
+            )
+        except Exception:
+            pass
+            
+    await call.message.reply(get_streak_message_text(user_id))
+    await call.answer()
+
+@dp.callback_query_handler(lambda call: call.data == "user_streak_leaderboard", state="*")
+async def user_streak_leaderboard_callback(call: types.CallbackQuery):
+    await call.message.reply(get_streak_leaderboard_message_text())
+    await call.answer()
+
 @dp.callback_query_handler(lambda call: call.data == "check_join", state="*")
 async def check_join_callback(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
+    
+    # Register user in DB if not already (handles old members who never used /start)
+    database.add_user(user_id, call.from_user.username, call.from_user.first_name)
+    
     if await is_user_member_of_group(user_id):
-        await call.answer("✅ تم التحقق! شكراً لانضمامك للمجموعة.", show_alert=True)
+        # Mark user as having started the bot
+        database.add_user(user_id, call.from_user.username, call.from_user.first_name, has_started=1)
+        
+        await call.answer("✅ تم التحقق! أنت عضو في المجموعة.", show_alert=True)
         await state.finish()
         
         is_owner = (user_id == config.OWNER_ID)
         try:
             await call.message.edit_text(
-                f"👋 <b>مرحباً بك مجدداً {call.from_user.first_name}!</b>\n"
-                f"تم التحقق من انضمامك للمجموعة بنجاح.\n"
+                f"👋 <b>مرحباً بك {call.from_user.first_name}!</b>\n"
+                f"✅ تم التحقق من عضويتك في المجموعة بنجاح.\n"
                 f"يمكنك الآن استخدام البوت بشكل طبيعي.",
                 reply_markup=None
             )
@@ -352,7 +515,7 @@ async def check_join_callback(call: types.CallbackQuery, state: FSMContext):
             reply_markup=keyboards.get_user_main_keyboard(is_owner)
         )
     else:
-        await call.answer("❌ لم تنضم للمجموعة بعد! يرجى الانضمام والمحاولة مجدداً.", show_alert=True)
+        await call.answer("❌ لم يتم التحقق من عضويتك بعد!\nتأكد أنك انضممت للمجموعة ثم حاول مجدداً.", show_alert=True)
 
 # --- Owner / Admin Control Panel Handlers ---
 
