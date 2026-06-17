@@ -76,8 +76,24 @@ async def is_user_member_of_group(user_id: int) -> bool:
         # Cannot confirm membership, require them to join
         return False
 
+async def is_user_member_of_channel(user_id: int) -> bool:
+    """Checks if the user is a member of the configured target channel."""
+    if config.CHANNEL_ID is None:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
+        if member.status in ['creator', 'administrator', 'member', 'restricted']:
+            return True
+        return False
+    except Exception as e:
+        error_msg = str(e).lower()
+        logging.warning(f"Error checking channel membership for user {user_id}: {e}")
+        if 'user not found' in error_msg or 'chat not found' in error_msg:
+            return False
+        return False
+
 class JoinCheckMiddleware(BaseMiddleware):
-    """Enforces that users join the target group before they can use private chat features."""
+    """Enforces that users join the target group and channel before they can use private chat features."""
     async def on_pre_process_message(self, message: types.Message, data: dict):
         if message.from_user.is_bot:
             raise CancelHandler()
@@ -94,13 +110,26 @@ class JoinCheckMiddleware(BaseMiddleware):
         if message.text and message.text.startswith('/start'):
             return
             
-        if not await is_user_member_of_group(message.from_user.id):
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
+        is_group_member = await is_user_member_of_group(message.from_user.id)
+        is_channel_member = await is_user_member_of_channel(message.from_user.id)
+        
+        if not is_group_member or not is_channel_member:
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            if not is_group_member:
+                markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
+            if not is_channel_member:
+                markup.add(types.InlineKeyboardButton("📢 انضم للقناة", url=config.CHANNEL_LINK))
             markup.add(types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join"))
             
+            if not is_group_member and not is_channel_member:
+                text = "🚫 <b>يجب الانضمام للقروب والقناة أولاً لاستخدام البوت!</b>"
+            elif not is_group_member:
+                text = "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>"
+            else:
+                text = "🚫 <b>يجب الانضمام للقناة أولاً لاستخدام البوت!</b>"
+                
             await message.reply(
-                "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>",
+                text,
                 reply_markup=markup
             )
             raise CancelHandler()
@@ -117,16 +146,32 @@ class JoinCheckMiddleware(BaseMiddleware):
         if callback_query.data == "check_join":
             return
             
-        if not await is_user_member_of_group(callback_query.from_user.id):
-            await callback_query.answer("🚫 يجب الانضمام للقروب أولاً!", show_alert=True)
+        is_group_member = await is_user_member_of_group(callback_query.from_user.id)
+        is_channel_member = await is_user_member_of_channel(callback_query.from_user.id)
+        
+        if not is_group_member or not is_channel_member:
+            if not is_group_member and not is_channel_member:
+                alert_text = "🚫 يجب الانضمام للقروب والقناة أولاً!"
+                text = "🚫 <b>يجب الانضمام للقروب والقناة أولاً لاستخدام البوت!</b>"
+            elif not is_group_member:
+                alert_text = "🚫 يجب الانضمام للقروب أولاً!"
+                text = "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>"
+            else:
+                alert_text = "🚫 يجب الانضمام للقناة أولاً!"
+                text = "🚫 <b>يجب الانضمام للقناة أولاً لاستخدام البوت!</b>"
+                
+            await callback_query.answer(alert_text, show_alert=True)
             
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            if not is_group_member:
+                markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
+            if not is_channel_member:
+                markup.add(types.InlineKeyboardButton("📢 انضم للقناة", url=config.CHANNEL_LINK))
             markup.add(types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join"))
             
             try:
                 await callback_query.message.edit_text(
-                    "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>",
+                    text,
                     reply_markup=markup
                 )
             except Exception:
@@ -194,7 +239,7 @@ def get_info_message_text():
         f"💡 <b>كيف تجمع النقاط؟</b>\n"
         f"• <b>نظام الإحالة:</b> شارك رابطك مع أصدقائك. عند دخول عضو جديد عبر رابطك وكتابته <b>{config.REFERRAL_REQUIRED_MESSAGES} رسالة</b> في المجموعة، يتم تفعيل إحالتك وتحصل على <b>+1 نقطة</b>.\n"
         f"• <b>مكافأة الإحالة المتكررة:</b> لكل 10 إحالات مفعّلة، ستحصل تلقائياً على <b>+5 نقاط إضافية</b>.\n"
-        f"• <b>نقاط التفاعل:</b> كل 20 رسالة ترسلها في المجموعة تمنحك تلقائياً <b>+1 نقطة تفاعل</b>.\n\n"
+        f"• <b>نقاط التفاعل:</b> كل {config.INTERACTION_THRESHOLD} رسالة ترسلها في المجموعة تمنحك تلقائياً <b>+1 نقطة تفاعل</b>.\n\n"
         f"⚠️ <b>مكافحة الغش:</b>\n"
         f"• الحسابات الوهمية أو البوتات يتم استبعادها تلقائياً.\n"
         f"• محاولة إحالة نفسك أو تكرار الدخول لن يتم احتسابها.\n"
@@ -211,13 +256,13 @@ def get_streak_message_text(user_id):
     daily_messages = streak['daily_messages']
     
     # Calculate daily progress percentage
-    progress_percentage = min(100, int((daily_messages / 20) * 100))
+    progress_percentage = min(100, int((daily_messages / config.INTERACTION_THRESHOLD) * 100))
     
     return (
         f"🔥 <b>سلسلة النشاط</b>\n\n"
         f"📅 <b>السلسلة الحالية:</b> {current_streak} يوم\n"
         f"🏆 <b>أعلى سلسلة:</b> {best_streak} يوم\n"
-        f"💬 <b>رسائل اليوم:</b> {daily_messages}/20\n"
+        f"💬 <b>رسائل اليوم:</b> {daily_messages}/{config.INTERACTION_THRESHOLD}\n"
         f"📈 <b>نسبة الإنجاز اليوم:</b> {progress_percentage}%"
     )
 
@@ -368,17 +413,28 @@ async def cmd_start(message: types.Message):
     # Attempt to register user in users table
     is_new = database.add_user(user_id, username, first_name, has_started=1)
         
-    # Check if they are in the group (except owner)
-    if user_id != config.OWNER_ID and not await is_user_member_of_group(user_id):
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
-        markup.add(types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join"))
+    # Check if they are in the group and channel (except owner)
+    if user_id != config.OWNER_ID:
+        is_group_member = await is_user_member_of_group(user_id)
+        is_channel_member = await is_user_member_of_channel(user_id)
         
-        await message.reply(
-            "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>",
-            reply_markup=markup
-        )
-        return
+        if not is_group_member or not is_channel_member:
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            if not is_group_member:
+                markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
+            if not is_channel_member:
+                markup.add(types.InlineKeyboardButton("📢 انضم للقناة", url=config.CHANNEL_LINK))
+            markup.add(types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join"))
+            
+            if not is_group_member and not is_channel_member:
+                text = "🚫 <b>يجب الانضمام للقروب والقناة أولاً لاستخدام البوت!</b>"
+            elif not is_group_member:
+                text = "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>"
+            else:
+                text = "🚫 <b>يجب الانضمام للقناة أولاً لاستخدام البوت!</b>"
+                
+            await message.reply(text, reply_markup=markup)
+            return
         
     welcome_text = (
         f"👋 <b>أهلاً بك {first_name} في بوت الإحالات والتفاعل!</b>\n\n"
@@ -491,18 +547,21 @@ async def check_join_callback(call: types.CallbackQuery, state: FSMContext):
     # Register user in DB if not already (handles old members who never used /start)
     database.add_user(user_id, call.from_user.username, call.from_user.first_name)
     
-    if await is_user_member_of_group(user_id):
+    is_group_member = await is_user_member_of_group(user_id)
+    is_channel_member = await is_user_member_of_channel(user_id)
+    
+    if is_group_member and is_channel_member:
         # Mark user as having started the bot
         database.add_user(user_id, call.from_user.username, call.from_user.first_name, has_started=1)
         
-        await call.answer("✅ تم التحقق! أنت عضو في المجموعة.", show_alert=True)
+        await call.answer("✅ تم التحقق! أنت عضو في المجموعة والقناة.", show_alert=True)
         await state.finish()
         
         is_owner = (user_id == config.OWNER_ID)
         try:
             await call.message.edit_text(
                 f"👋 <b>مرحباً بك {call.from_user.first_name}!</b>\n"
-                f"✅ تم التحقق من عضويتك في المجموعة بنجاح.\n"
+                f"✅ تم التحقق من عضويتك في المجموعة والقناة بنجاح.\n"
                 f"يمكنك الآن استخدام البوت بشكل طبيعي.",
                 reply_markup=None
             )
@@ -515,7 +574,32 @@ async def check_join_callback(call: types.CallbackQuery, state: FSMContext):
             reply_markup=keyboards.get_user_main_keyboard(is_owner)
         )
     else:
-        await call.answer("❌ لم يتم التحقق من عضويتك بعد!\nتأكد أنك انضممت للمجموعة ثم حاول مجدداً.", show_alert=True)
+        if not is_group_member and not is_channel_member:
+            alert_text = "❌ لم يتم التحقق من انضمامك بعد!\nتأكد أنك انضممت للمجموعة والقناة ثم حاول مجدداً."
+            text = "🚫 <b>يجب الانضمام للقروب والقناة أولاً لاستخدام البوت!</b>"
+        elif not is_group_member:
+            alert_text = "❌ لم يتم التحقق من انضمامك للمجموعة!\nتأكد أنك انضممت للمجموعة ثم حاول مجدداً."
+            text = "🚫 <b>يجب الانضمام للقروب أولاً لاستخدام البوت!</b>"
+        else:
+            alert_text = "❌ لم يتم التحقق من انضمامك للقناة!\nتأكد أنك انضممت للقناة ثم حاول مجدداً."
+            text = "🚫 <b>يجب الانضمام للقناة أولاً لاستخدام البوت!</b>"
+            
+        await call.answer(alert_text, show_alert=True)
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        if not is_group_member:
+            markup.add(types.InlineKeyboardButton("📢 انضم للقروب", url=config.GROUP_LINK))
+        if not is_channel_member:
+            markup.add(types.InlineKeyboardButton("📢 انضم للقناة", url=config.CHANNEL_LINK))
+        markup.add(types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join"))
+        
+        try:
+            await call.message.edit_text(
+                text,
+                reply_markup=markup
+            )
+        except Exception:
+            pass
 
 # --- Owner / Admin Control Panel Handlers ---
 

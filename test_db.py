@@ -5,6 +5,8 @@ import config
 
 # Use a separate test database
 config.DB_NAME = "test_bot_database.db"
+config.REFERRAL_REQUIRED_MESSAGES = 15
+config.INTERACTION_THRESHOLD = 20
 
 import database
 

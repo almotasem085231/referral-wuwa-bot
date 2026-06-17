@@ -29,8 +29,22 @@ else:
 # Link to the Telegram Group for the mandatory join check
 GROUP_LINK = os.getenv("GROUP_LINK", "https://t.me/GROUP_USERNAME")
 
+# Link to the Telegram Channel for the mandatory join check
+CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/Gacha_Nexus_News")
+
+# Target Channel Chat ID or username (e.g., @Gacha_Nexus_News or -100xxxxxxxxxx)
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gacha_Nexus_News")
+if CHANNEL_ID:
+    try:
+        CHANNEL_ID = int(CHANNEL_ID)
+    except ValueError:
+        pass
+
 # Number of messages the referred user must write in the group to activate the referral
-REFERRAL_REQUIRED_MESSAGES = int(os.getenv("REFERRAL_REQUIRED_MESSAGES", "15"))
+REFERRAL_REQUIRED_MESSAGES = int(os.getenv("REFERRAL_REQUIRED_MESSAGES", "20"))
+
+# Number of messages required to earn 1 interaction point and maintain daily streak
+INTERACTION_THRESHOLD = int(os.getenv("INTERACTION_THRESHOLD", "50"))
 
 # Database configuration
 DB_NAME = "bot_database.db"

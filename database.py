@@ -233,7 +233,7 @@ def recalculate_referrer_points(referrer_id, cursor):
 def increment_message_count(user_id):
     """
     Increments user group message count.
-    Also handles pending referral progression and interaction points (+1 for every 20 messages).
+    Also handles pending referral progression and interaction points (+1 for every config.INTERACTION_THRESHOLD messages).
     
     Returns:
         dict: {
@@ -274,9 +274,9 @@ def increment_message_count(user_id):
             (new_messages, user_id)
         )
         
-        # Check interaction points (1 point per 20 messages)
-        old_interaction_pts = old_messages // 20
-        new_interaction_pts = new_messages // 20
+        # Check interaction points (1 point per config.INTERACTION_THRESHOLD messages)
+        old_interaction_pts = old_messages // config.INTERACTION_THRESHOLD
+        new_interaction_pts = new_messages // config.INTERACTION_THRESHOLD
         if new_interaction_pts > old_interaction_pts:
             result['interaction_point_earned'] = True
             cursor.execute(
@@ -635,7 +635,7 @@ def reset_all_database():
 def update_streak_on_message(user_id):
     """
     Increments the daily message count for the user's streak.
-    If the user reaches 20 messages today, updates current_streak and best_streak.
+    If the user reaches config.INTERACTION_THRESHOLD messages today, updates current_streak and best_streak.
     Also handles daily reset and streak breaks.
     
     Returns:
@@ -713,8 +713,8 @@ def update_streak_on_message(user_id):
             # Same day, just increment daily messages
             daily_messages += 1
             
-        # 3. Check if user reached the active threshold (20 messages) today
-        if daily_messages == 20:
+        # 3. Check if user reached the active threshold today
+        if daily_messages == config.INTERACTION_THRESHOLD:
             if last_active_day != today:
                 # Streak achieved!
                 result['streak_achieved'] = True
