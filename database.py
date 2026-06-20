@@ -213,8 +213,8 @@ def recalculate_referrer_points(referrer_id, cursor):
     )
     active_count = cursor.fetchone()['active_count']
     
-    # 1 point per active referral
-    referral_points = active_count
+    # 2 points per active referral
+    referral_points = active_count * 2
     
     # 5 bonus points for every 10 active referrals
     bonus_points = (active_count // 10) * 5
